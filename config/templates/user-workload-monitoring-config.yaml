@@ -1,0 +1,12 @@
+{{- if .Values.operators.userWorkloadMonitoring.enabled }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: user-workload-monitoring-config
+  namespace: openshift-user-workload-monitoring
+data:
+  config.yaml: |
+    prometheus:
+      retention: {{ .Values.operators.userWorkloadMonitoring.config.prometheus.retention }}
+{{- end }}

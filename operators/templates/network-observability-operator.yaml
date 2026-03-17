@@ -1,0 +1,28 @@
+{{- if .Values.operators.networkObservabilityOperator.enabled }}
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: openshift-netobserv-operator
+  labels:
+    openshift.io/cluster-monitoring: "true"
+---
+apiVersion: operators.coreos.com/v1
+kind: OperatorGroup
+metadata:
+  name: netobserv-operator
+  namespace: openshift-netobserv-operator
+spec: {}
+---
+apiVersion: operators.coreos.com/v1alpha1
+kind: Subscription
+metadata:
+  name: netobserv-operator
+  namespace: openshift-netobserv-operator
+spec:
+  channel: {{ .Values.operators.networkObservabilityOperator.channel }}
+  installPlanApproval: Automatic
+  name: netobserv-operator
+  source: redhat-operators
+  sourceNamespace: openshift-marketplace
+{{- end }}

@@ -1,0 +1,20 @@
+{{- if .Values.operators.networkObservabilityOperator.enabled }}
+---
+apiVersion: flows.netobserv.io/v1beta2
+kind: FlowCollector
+metadata:
+  name: cluster
+spec:
+  deploymentModel: Direct
+  agent:
+    type: eBPF
+    ebpf:
+      sampling: {{ .Values.operators.networkObservabilityOperator.config.agent.sampling }}
+      privileged: {{ .Values.operators.networkObservabilityOperator.config.agent.privileged }}
+  processor:
+    logTypes: Flows
+  consolePlugin:
+    enable: true
+    portNaming:
+      enable: true
+{{- end }}

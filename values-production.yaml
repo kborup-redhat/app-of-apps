@@ -1,0 +1,58 @@
+global:
+  repoURL: https://github.com/kborup-redhat/app-of-apps.git
+  targetRevision: main
+
+clusterName: production
+disableSelfProvisioning: true
+clusterDomain: apps.production.example.com
+
+operators:
+  complianceOperator:
+    enabled: true
+    channel: stable
+    config:
+      profiles:
+        - ocp4-cis
+        - ocp4-cis-node
+      scanSetting: default
+
+  keycloakOperator:
+    enabled: true
+    channel: stable-v24
+    config:
+      instances: 2
+      hostname: keycloak.apps.production.example.com
+      realm:
+        name: production-realm
+        displayName: Production Realm
+      groups:
+        - name: cluster-admins
+          clusterRole: cluster-admin
+        - name: cluster-readers
+          clusterRole: cluster-reader
+        - name: developers
+          clusterRole: edit
+      oauth:
+        enabled: true
+        clientId: openshift-oauth
+
+  fileIntegrityOperator:
+    enabled: true
+    channel: stable
+    config:
+      gracePeriod: 900
+      maxBackups: 5
+
+  networkObservabilityOperator:
+    enabled: true
+    channel: stable
+    config:
+      agent:
+        sampling: 50
+        privileged: false
+
+  userWorkloadMonitoring:
+    enabled: true
+    config:
+      prometheus:
+        retention: 48h

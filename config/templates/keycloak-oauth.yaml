@@ -1,0 +1,164 @@
+{{- if and .Values.operators.keycloakOperator.enabled .Values.operators.keycloakOperator.config.oauth.enabled }}
+{{- $kc := .Values.operators.keycloakOperator.config }}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: oauth-patcher
+  namespace: openshift-gitops
+  annotations:
+    argocd.argoproj.io/hook: PostSync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: oauth-patcher
+  annotations:
+    argocd.argoproj.io/hook: PostSync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+rules:
+  - apiGroups: ["config.openshift.io"]
+    resources: ["oauths"]
+    verbs: ["get", "patch"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: oauth-patcher
+  annotations:
+    argocd.argoproj.io/hook: PostSync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+subjects:
+  - kind: ServiceAccount
+    name: oauth-patcher
+    namespace: openshift-gitops
+roleRef:
+  kind: ClusterRole
+  name: oauth-patcher
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: oauth-keycloak-patcher
+  namespace: openshift-gitops
+  annotations:
+    argocd.argoproj.io/hook: PostSync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+spec:
+  backoffLimit: 3
+  ttlSecondsAfterFinished: 300
+  template:
+    spec:
+      serviceAccountName: oauth-patcher
+      restartPolicy: Never
+      containers:
+        - name: patch
+          image: registry.redhat.io/openshift4/ose-cli:latest
+          command:
+            - /bin/bash
+            - -c
+            - |
+              DESIRED_IDP='{
+                "name": "keycloak",
+                "mappingMethod": "claim",
+                "type": "OpenID",
+                "openID": {
+                  "clientID": "{{ $kc.oauth.clientId }}",
+                  "clientSecret": {
+                    "name": "keycloak-client-secret"
+                  },
+                  "issuer": "https://{{ $kc.hostname }}/realms/{{ $kc.realm.name }}",
+                  "claims": {
+                    "preferredUsername": ["preferred_username"],
+                    "name": ["name", "preferred_username"],
+                    "email": ["email"],
+                    "groups": ["groups"]
+                  }
+                }
+              }'
+
+              echo "Checking current OAuth identity providers..."
+
+              IDX=$(oc get oauth cluster -o json | python3 -c "
+              import json, sys
+              oauth = json.load(sys.stdin)
+              providers = oauth.get('spec', {}).get('identityProviders', [])
+              for i, p in enumerate(providers):
+                  if p.get('name') == 'keycloak':
+                      print(i)
+                      sys.exit(0)
+              print(-1)
+              ")
+
+              if [ "$IDX" = "-1" ]; then
+                echo "Adding Keycloak identity provider..."
+                oc patch oauth cluster --type=json -p "[{\"op\": \"add\", \"path\": \"/spec/identityProviders/-\", \"value\": $DESIRED_IDP}]"
+              else
+                echo "Updating existing Keycloak identity provider at index $IDX..."
+                oc patch oauth cluster --type=json -p "[{\"op\": \"replace\", \"path\": \"/spec/identityProviders/$IDX\", \"value\": $DESIRED_IDP}]"
+              fi
+
+              if [ $? -eq 0 ]; then
+                echo "Keycloak identity provider configured successfully."
+              else
+                echo "Failed to patch OAuth config."
+                exit 1
+              fi
+
+              echo "Setting access token max age to 1800 seconds (30 minutes)..."
+              oc patch oauth cluster --type=json -p '[{"op": "add", "path": "/spec/tokenConfig", "value": {"accessTokenMaxAgeSeconds": 86400}}]' 2>/dev/null \
+                || oc patch oauth cluster --type=json -p '[{"op": "replace", "path": "/spec/tokenConfig/accessTokenMaxAgeSeconds", "value": 86400}]'
+              echo "Token max age configured."
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: oauth-keycloak-cleanup
+  namespace: openshift-gitops
+  annotations:
+    argocd.argoproj.io/hook: PreDelete
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+spec:
+  backoffLimit: 3
+  ttlSecondsAfterFinished: 300
+  template:
+    spec:
+      serviceAccountName: oauth-patcher
+      restartPolicy: Never
+      containers:
+        - name: cleanup
+          image: registry.redhat.io/openshift4/ose-cli:latest
+          command:
+            - /bin/bash
+            - -c
+            - |
+              echo "Removing Keycloak identity provider from OAuth config..."
+
+              IDX=$(oc get oauth cluster -o json | python3 -c "
+              import json, sys
+              oauth = json.load(sys.stdin)
+              providers = oauth.get('spec', {}).get('identityProviders', [])
+              for i, p in enumerate(providers):
+                  if p.get('name') == 'keycloak':
+                      print(i)
+                      sys.exit(0)
+              print(-1)
+              ")
+
+              if [ "$IDX" = "-1" ]; then
+                echo "Keycloak identity provider not found. Nothing to remove."
+              else
+                echo "Removing Keycloak identity provider at index $IDX..."
+                oc patch oauth cluster --type=json -p "[{\"op\": \"remove\", \"path\": \"/spec/identityProviders/$IDX\"}]"
+                echo "Keycloak identity provider removed."
+              fi
+
+              # Clean up the client secret from openshift-config
+              oc delete secret keycloak-client-secret -n openshift-config --ignore-not-found
+              echo "Cleanup complete."
+{{- end }}

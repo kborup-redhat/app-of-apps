@@ -1,0 +1,18 @@
+{{- if .Values.operators.complianceOperator.enabled }}
+---
+apiVersion: compliance.openshift.io/v1alpha1
+kind: ScanSettingBinding
+metadata:
+  name: cis-compliance
+  namespace: openshift-compliance
+profiles:
+{{- range .Values.operators.complianceOperator.config.profiles }}
+  - name: {{ . }}
+    kind: Profile
+    apiGroup: compliance.openshift.io/v1alpha1
+{{- end }}
+settingsRef:
+  name: {{ .Values.operators.complianceOperator.config.scanSetting }}
+  kind: ScanSetting
+  apiGroup: compliance.openshift.io/v1alpha1
+{{- end }}

@@ -1,0 +1,85 @@
+{{- if .Values.disableSelfProvisioning }}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: self-provisioning-patcher
+  namespace: openshift-gitops
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+    argocd.argoproj.io/hook: Sync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: self-provisioning-patcher
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+    argocd.argoproj.io/hook: Sync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+rules:
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["clusterrolebindings"]
+    verbs: ["get", "patch"]
+  - apiGroups: ["", "project.openshift.io"]
+    resources: ["projectrequests"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: self-provisioning-patcher
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+    argocd.argoproj.io/hook: Sync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+subjects:
+  - kind: ServiceAccount
+    name: self-provisioning-patcher
+    namespace: openshift-gitops
+roleRef:
+  kind: ClusterRole
+  name: self-provisioning-patcher
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: disable-self-provisioning
+  namespace: openshift-gitops
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+    argocd.argoproj.io/hook: Sync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+spec:
+  backoffLimit: 3
+  ttlSecondsAfterFinished: 300
+  template:
+    spec:
+      serviceAccountName: self-provisioning-patcher
+      restartPolicy: Never
+      containers:
+        - name: patch
+          image: registry.redhat.io/openshift4/ose-cli:latest
+          command:
+            - /bin/bash
+            - -c
+            - |
+              echo "Disabling self-provisioning..."
+
+              SUBJECTS=$(oc get clusterrolebinding self-provisioners -o jsonpath='{.subjects}' 2>/dev/null)
+              if [ -z "$SUBJECTS" ] || [ "$SUBJECTS" = "null" ]; then
+                echo "Self-provisioning is already disabled."
+              else
+                oc patch clusterrolebinding self-provisioners \
+                  --type=json \
+                  -p '[{"op": "remove", "path": "/subjects"}]'
+
+                oc annotate clusterrolebinding self-provisioners \
+                  rbac.authorization.kubernetes.io/autoupdate=false \
+                  --overwrite
+
+                echo "Self-provisioning disabled."
+              fi
+{{- end }}

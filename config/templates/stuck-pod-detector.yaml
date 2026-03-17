@@ -1,0 +1,135 @@
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: stuck-pod-detector
+  namespace: openshift-gitops
+  annotations:
+    argocd.argoproj.io/hook: PostSync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: stuck-pod-detector
+  annotations:
+    argocd.argoproj.io/hook: PostSync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "delete"]
+  - apiGroups: ["apps"]
+    resources: ["statefulsets"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: stuck-pod-detector
+  annotations:
+    argocd.argoproj.io/hook: PostSync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+subjects:
+  - kind: ServiceAccount
+    name: stuck-pod-detector
+    namespace: openshift-gitops
+roleRef:
+  kind: ClusterRole
+  name: stuck-pod-detector
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: stuck-pod-detector
+  namespace: openshift-gitops
+  annotations:
+    argocd.argoproj.io/hook: PostSync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+spec:
+  backoffLimit: 1
+  ttlSecondsAfterFinished: 300
+  template:
+    spec:
+      serviceAccountName: stuck-pod-detector
+      restartPolicy: Never
+      containers:
+        - name: detect
+          image: registry.redhat.io/openshift4/ose-cli:latest
+          command:
+            - /bin/bash
+            - -c
+            - |
+              echo "Checking for stuck pods in managed namespaces..."
+
+              NAMESPACES="{{ if .Values.operators.complianceOperator.enabled }}openshift-compliance {{ end -}}
+              {{- if .Values.operators.keycloakOperator.enabled }}rhbk {{ end -}}
+              {{- if .Values.operators.fileIntegrityOperator.enabled }}openshift-file-integrity {{ end -}}
+              {{- if .Values.operators.networkObservabilityOperator.enabled }}openshift-netobserv-operator {{ end -}}"
+
+              THRESHOLD=120
+
+              for NS in $NAMESPACES; do
+                echo "Checking namespace: $NS"
+
+                # Find pods stuck in ContainerCreating, Pending, or Init for too long
+                STUCK_PODS=$(oc get pods -n "$NS" -o json | python3 -c "
+              import json, sys
+              from datetime import datetime, timezone
+
+              data = json.load(sys.stdin)
+              threshold = $THRESHOLD
+              now = datetime.now(timezone.utc)
+
+              for pod in data.get('items', []):
+                  name = pod['metadata']['name']
+                  phase = pod['status'].get('phase', '')
+                  created = pod['metadata'].get('creationTimestamp', '')
+
+                  if not created:
+                      continue
+
+                  created_dt = datetime.fromisoformat(created.replace('Z', '+00:00'))
+                  age_seconds = (now - created_dt).total_seconds()
+
+                  if age_seconds < threshold:
+                      continue
+
+                  # Check container statuses for stuck states
+                  containers = pod['status'].get('containerStatuses', [])
+                  init_containers = pod['status'].get('initContainerStatuses', [])
+
+                  for cs in containers + init_containers:
+                      waiting = cs.get('state', {}).get('waiting', {})
+                      reason = waiting.get('reason', '')
+                      if reason in ['ContainerCreating', 'CrashLoopBackOff', 'ImagePullBackOff', 'ErrImagePull', 'CreateContainerConfigError']:
+                          print(f'{name}|{reason}|{int(age_seconds)}s')
+                          break
+
+                  if phase == 'Pending' and age_seconds > threshold:
+                      print(f'{name}|Pending|{int(age_seconds)}s')
+              ")
+
+                if [ -z "$STUCK_PODS" ]; then
+                  echo "  No stuck pods found"
+                  continue
+                fi
+
+                echo "$STUCK_PODS" | while IFS='|' read -r POD_NAME REASON AGE; do
+                  echo "  STUCK: $POD_NAME ($REASON, age: $AGE)"
+
+                  # Check if the pod belongs to a StatefulSet
+                  OWNER=$(oc get pod "$POD_NAME" -n "$NS" -o jsonpath='{.metadata.ownerReferences[0].kind}' 2>/dev/null)
+
+                  if [ "$OWNER" = "StatefulSet" ]; then
+                    echo "  -> Deleting stuck StatefulSet pod $POD_NAME to trigger recreation"
+                    oc delete pod "$POD_NAME" -n "$NS" --grace-period=0 --force 2>/dev/null
+                    echo "  -> Deleted"
+                  else
+                    echo "  -> Pod owned by $OWNER, skipping (not a StatefulSet)"
+                  fi
+                done
+              done
+
+              echo "Done."

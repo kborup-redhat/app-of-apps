@@ -1,0 +1,228 @@
+{{- if .Values.operators.keycloakOperator.enabled }}
+{{- $kc := .Values.operators.keycloakOperator.config }}
+{{- $realmSpec := dict "groups" $kc.groups "oauth" $kc.oauth "realm" $kc.realm }}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: realm-importer
+  namespace: rhbk
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+    argocd.argoproj.io/hook: Sync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: realm-importer
+  namespace: rhbk
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+    argocd.argoproj.io/hook: Sync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get"]
+  - apiGroups: ["k8s.keycloak.org"]
+    resources: ["keycloaks"]
+    verbs: ["get"]
+  - apiGroups: ["k8s.keycloak.org"]
+    resources: ["keycloakrealmimports"]
+    verbs: ["get", "create", "delete", "list", "patch", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: realm-importer
+  namespace: rhbk
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+    argocd.argoproj.io/hook: Sync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+subjects:
+  - kind: ServiceAccount
+    name: realm-importer
+    namespace: rhbk
+roleRef:
+  kind: Role
+  name: realm-importer
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: realm-importer-{{ $realmSpec | toJson | sha256sum | trunc 8 }}
+  namespace: rhbk
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+    argocd.argoproj.io/hook: Sync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+spec:
+  backoffLimit: 5
+  ttlSecondsAfterFinished: 600
+  template:
+    spec:
+      serviceAccountName: realm-importer
+      restartPolicy: Never
+      containers:
+        - name: import
+          image: registry.redhat.io/openshift4/ose-cli:latest
+          command:
+            - /bin/bash
+            - -c
+            - |
+              echo "Waiting for Keycloak to be ready..."
+              for i in $(seq 1 60); do
+                STATUS=$(oc get keycloak keycloak -n rhbk -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null)
+                if [ "$STATUS" = "True" ]; then
+                  echo "Keycloak is ready."
+                  break
+                fi
+                echo "  Waiting... ($i/60)"
+                sleep 10
+              done
+
+              {{- if and $kc.oauth $kc.oauth.enabled }}
+              # Read generated client secret
+              CLIENT_SECRET=$(oc get secret keycloak-oauth-client-secret -n rhbk -o jsonpath='{.data.clientSecret}' | base64 -d)
+              if [ -z "$CLIENT_SECRET" ]; then
+                echo "ERROR: Could not read client secret from keycloak-oauth-client-secret"
+                exit 1
+              fi
+              echo "Client secret retrieved."
+              {{- end }}
+
+              echo "Creating KeycloakRealmImport..."
+              cat <<'REALMEOF' | {{ if and $kc.oauth $kc.oauth.enabled }}sed "s|CLIENT_SECRET_PLACEHOLDER|$CLIENT_SECRET|g" |{{ end }} oc apply -f -
+              apiVersion: k8s.keycloak.org/v2alpha1
+              kind: KeycloakRealmImport
+              metadata:
+                name: {{ $kc.realm.name }}
+                namespace: rhbk
+              spec:
+                keycloakCRName: keycloak
+                realm:
+                  realm: {{ $kc.realm.name }}
+                  enabled: true
+                  displayName: {{ $kc.realm.displayName | quote }}
+              {{- if $kc.groups }}
+                  groups:
+              {{- range $kc.groups }}
+                    - name: {{ .name }}
+              {{- end }}
+              {{- end }}
+              {{- if and $kc.oauth $kc.oauth.enabled }}
+                  clientScopes:
+                    - name: groups
+                      protocol: openid-connect
+                      protocolMappers:
+                        - name: groups
+                          protocol: openid-connect
+                          protocolMapper: oidc-group-membership-mapper
+                          config:
+                            full.path: "false"
+                            id.token.claim: "true"
+                            access.token.claim: "true"
+                            claim.name: groups
+                            userinfo.token.claim: "true"
+                  clients:
+                    - clientId: {{ $kc.oauth.clientId }}
+                      enabled: true
+                      clientAuthenticatorType: client-secret
+                      secret: CLIENT_SECRET_PLACEHOLDER
+                      protocol: openid-connect
+                      standardFlowEnabled: true
+                      directAccessGrantsEnabled: true
+                      redirectUris:
+                        - "https://oauth-openshift.{{ $.Values.clusterDomain }}/oauth2callback/keycloak"
+                      defaultClientScopes:
+                        - openid
+                        - email
+                        - profile
+                        - groups
+                      protocolMappers:
+                        - name: preferred_username
+                          protocol: openid-connect
+                          protocolMapper: oidc-usermodel-attribute-mapper
+                          config:
+                            user.attribute: username
+                            claim.name: preferred_username
+                            id.token.claim: "true"
+                            access.token.claim: "true"
+                            userinfo.token.claim: "true"
+              {{- end }}
+              REALMEOF
+
+              echo "Waiting for realm import to complete..."
+              for i in $(seq 1 60); do
+                DONE=$(oc get keycloakrealmimport {{ $kc.realm.name }} -n rhbk -o jsonpath='{.status.conditions[?(@.type=="Done")].status}' 2>/dev/null)
+                ERRORS=$(oc get keycloakrealmimport {{ $kc.realm.name }} -n rhbk -o jsonpath='{.status.conditions[?(@.type=="HasErrors")].status}' 2>/dev/null)
+                if [ "$DONE" = "True" ]; then
+                  if [ "$ERRORS" = "True" ]; then
+                    echo "ERROR: Realm import completed with errors."
+                    exit 1
+                  fi
+                  echo "Realm import completed successfully."
+                  break
+                fi
+                echo "  Waiting for import... ($i/60)"
+                sleep 10
+              done
+
+              if [ "$DONE" != "True" ]; then
+                echo "ERROR: Realm import timed out."
+                exit 1
+              fi
+
+              {{- if and $kc.oauth $kc.oauth.enabled }}
+              # Ensure preferred_username mapper exists on the client via admin API
+              echo "Configuring client protocol mappers via admin API..."
+              ADMIN_PASS=$(oc get secret keycloak-initial-admin -n rhbk -o jsonpath='{.data.password}' | base64 -d)
+              ADMIN_USER=$(oc get secret keycloak-initial-admin -n rhbk -o jsonpath='{.data.username}' | base64 -d)
+              KC_URL="https://{{ $kc.hostname }}"
+
+              TOKEN=$(curl -sk "$KC_URL/realms/master/protocol/openid-connect/token" \
+                -d "client_id=admin-cli" \
+                -d "username=$ADMIN_USER" \
+                -d "password=$ADMIN_PASS" \
+                -d "grant_type=password" | python3 -c "import json,sys; print(json.load(sys.stdin)['access_token'])")
+
+              # Get client internal ID
+              CLIENT_UUID=$(curl -sk -H "Authorization: Bearer $TOKEN" \
+                "$KC_URL/admin/realms/{{ $kc.realm.name }}/clients?clientId={{ $kc.oauth.clientId }}" \
+                | python3 -c "import json,sys; print(json.load(sys.stdin)[0]['id'])")
+
+              # Check if preferred_username mapper already exists
+              MAPPER_EXISTS=$(curl -sk -H "Authorization: Bearer $TOKEN" \
+                "$KC_URL/admin/realms/{{ $kc.realm.name }}/clients/$CLIENT_UUID/protocol-mappers/models" \
+                | python3 -c "
+              import json,sys
+              mappers = json.load(sys.stdin)
+              print('true' if any(m.get('name') == 'preferred_username' for m in mappers) else 'false')
+              ")
+
+              if [ "$MAPPER_EXISTS" = "false" ]; then
+                echo "Adding preferred_username protocol mapper..."
+                curl -sk -X POST -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+                  "$KC_URL/admin/realms/{{ $kc.realm.name }}/clients/$CLIENT_UUID/protocol-mappers/models" \
+                  -d '{
+                    "name": "preferred_username",
+                    "protocol": "openid-connect",
+                    "protocolMapper": "oidc-usermodel-attribute-mapper",
+                    "config": {
+                      "user.attribute": "username",
+                      "claim.name": "preferred_username",
+                      "id.token.claim": "true",
+                      "access.token.claim": "true",
+                      "userinfo.token.claim": "true"
+                    }
+                  }'
+                echo ""
+                echo "Protocol mapper added."
+              else
+                echo "preferred_username protocol mapper already exists."
+              fi
+              {{- end }}
+{{- end }}

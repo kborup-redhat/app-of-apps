@@ -1,0 +1,30 @@
+{{- if .Values.operators.fileIntegrityOperator.enabled }}
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: openshift-file-integrity
+  labels:
+    openshift.io/cluster-monitoring: "true"
+---
+apiVersion: operators.coreos.com/v1
+kind: OperatorGroup
+metadata:
+  name: file-integrity-operator
+  namespace: openshift-file-integrity
+spec:
+  targetNamespaces:
+    - openshift-file-integrity
+---
+apiVersion: operators.coreos.com/v1alpha1
+kind: Subscription
+metadata:
+  name: file-integrity-operator
+  namespace: openshift-file-integrity
+spec:
+  channel: {{ .Values.operators.fileIntegrityOperator.channel }}
+  installPlanApproval: Automatic
+  name: file-integrity-operator
+  source: redhat-operators
+  sourceNamespace: openshift-marketplace
+{{- end }}

@@ -1,0 +1,14 @@
+{{- if .Values.operators.fileIntegrityOperator.enabled }}
+---
+apiVersion: fileintegrity.openshift.io/v1alpha1
+kind: FileIntegrity
+metadata:
+  name: worker-fileintegrity
+  namespace: openshift-file-integrity
+spec:
+  nodeSelector:
+    node-role.kubernetes.io/worker: ""
+  config:
+    gracePeriod: {{ .Values.operators.fileIntegrityOperator.config.gracePeriod }}
+    maxBackups: {{ .Values.operators.fileIntegrityOperator.config.maxBackups }}
+{{- end }}

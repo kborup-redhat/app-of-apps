@@ -1,0 +1,5 @@
+apiVersion: v2
+name: cluster-config
+description: App-of-apps parent chart for operator deployment
+version: 1.0.0
+type: application

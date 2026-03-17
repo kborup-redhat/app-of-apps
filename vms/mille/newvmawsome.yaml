@@ -1,0 +1,67 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: mille
+  annotations:
+    argocd.argoproj.io/sync-wave: "-1"
+---
+apiVersion: kubevirt.io/v1
+kind: VirtualMachine
+metadata:
+  name: newvmawsome
+  namespace: mille
+  labels:
+    app: newvmawsome
+    vm.kubevirt.io/template: rhel9-desktop-large
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+spec:
+  running: true
+  template:
+    metadata:
+      labels:
+        kubevirt.io/vm: newvmawsome
+    spec:
+      domain:
+        cpu:
+          cores: 1
+          sockets: 1
+          threads: 1
+        memory:
+          guest: 2Gi
+        devices:
+          disks:
+            - name: rootdisk
+              disk:
+                bus: virtio
+            - name: cloudinitdisk
+              disk:
+                bus: virtio
+          interfaces:
+            - name: default
+              masquerade: {}
+      networks:
+        - name: default
+          pod: {}
+      volumes:
+        - name: rootdisk
+          dataVolume:
+            name: newvmawsome-rootdisk
+        - name: cloudinitdisk
+          cloudInitNoCloud:
+            userData: |
+              #cloud-config
+              user: cloud-user
+              ssh_authorized_keys: []
+  dataVolumeTemplates:
+    - metadata:
+        name: newvmawsome-rootdisk
+      spec:
+        storage:
+          resources:
+            requests:
+              storage: 30Gi
+        sourceRef:
+          kind: DataSource
+          name: rhel9
+          namespace: openshift-virtualization-os-images

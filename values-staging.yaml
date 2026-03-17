@@ -1,0 +1,61 @@
+global:
+    repoURL: https://github.com/kborup-redhat/app-of-apps.git
+    targetRevision: main
+clusterName: staging
+disableSelfProvisioning: true
+clusterDomain: apps.cluster-nsr6m.dynamic.redhatworkshops.io
+operators:
+    complianceOperator:
+        enabled: true
+        channel: stable
+        config:
+            profiles:
+                - ocp4-cis
+                - ocp4-cis-node
+            scanSetting: default
+    keycloakOperator:
+        enabled: true
+        channel: stable-v24
+        config:
+            instances: 1
+            hostname: keycloak.apps.cluster-nsr6m.dynamic.redhatworkshops.io
+            realm:
+                name: kimborups-realm
+                displayName: KimBorups Realm
+            groups:
+                - name: cluster-admins
+                  clusterRole: cluster-admin
+                - name: cluster-readers
+                  clusterRole: cluster-reader
+                - name: developers
+                  clusterRole: edit
+                - name: testname-admins
+                  namespace: testname
+                  role: admin
+                - name: spacewalk-namespace
+                  namespace: spacewalk
+                  role: admin
+                - name: mika
+                  namespace: mika
+                  role: admin
+            oauth:
+                enabled: true
+                clientId: openshift-oauth
+    fileIntegrityOperator:
+        enabled: false
+        channel: stable
+        config:
+            gracePeriod: 900
+            maxBackups: 5
+    networkObservabilityOperator:
+        enabled: true
+        channel: stable
+        config:
+            agent:
+                sampling: 50
+                privileged: false
+    userWorkloadMonitoring:
+        enabled: true
+        config:
+            prometheus:
+                retention: 24h
